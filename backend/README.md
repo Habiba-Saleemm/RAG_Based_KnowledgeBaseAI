@@ -21,12 +21,32 @@ cp .env.example .env
 ```
 Edit `.env` with your real MySQL password + DB name.
 
+For SQLAlchemy-backed FAQ CRUD, also set:
+```env
+DATABASE_URL=sqlite:///./app.db
+```
+or (MySQL example):
+```env
+DATABASE_URL=mysql+mysqlconnector://authapp:your_password@localhost/authdb
+```
+
+For separate admin login access, set admin emails (comma-separated):
+```env
+ADMIN_EMAILS=admin1@example.com,admin2@example.com
+```
+
 ## 4. Run the backend
 ```bash
 uvicorn main:app --reload --port 5000
 ```
 Server runs at **http://localhost:5000**.
 Interactive API docs (auto-generated): **http://localhost:5000/docs**
+
+### FAQ CRUD endpoints
+- `GET /api/faqs`
+- `POST /api/faqs`
+- `PUT /api/faqs/{id}`
+- `DELETE /api/faqs/{id}`
 
 ## 5. Connect the frontend
 In your Next.js project root, create `.env.local`:
@@ -84,3 +104,4 @@ curl -X POST http://localhost:5000/api/register \
 
 Or just open **http://localhost:5000/docs** and try it in the browser —
 FastAPI gives you this Swagger UI for free.
+

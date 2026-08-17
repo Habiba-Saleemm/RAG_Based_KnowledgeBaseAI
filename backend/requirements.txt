@@ -3,3 +3,10 @@ uvicorn[standard]==0.30.6
 mysql-connector-python==8.4.0
 bcrypt==4.2.0
 python-dotenv==1.0.1
+SQLAlchemy==2.0.36
+sentence-transformers
+numpy
+pypdf
+python-docx
+openpyxl
+python-multipart

@@ -10,7 +10,10 @@ import Input from "../ui/Input";
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
 
+type LoginPortal = "user" | "admin";
+
 // Detailed, per-case email validation (matches backend validators.py exactly)
+
 function validateEmail(email: string): string {
   if (!email.trim()) return "Please enter your email.";
 
@@ -21,7 +24,7 @@ function validateEmail(email: string): string {
   const atCount = (email.match(/@/g) || []).length;
 
   if (atCount === 0) {
-    return "Please enter a valid email address.\nThe email must contain an '@' symbol.\n\nExample: habiba@example.com";
+    return "Please enter a valid email address.\nThe email must contain an '@' symbol.\n\nExample: abc@example.com";
   }
   if (atCount > 1) {
     return "Please enter a valid email address.\nAn email address can contain only one '@' symbol.";
@@ -30,19 +33,19 @@ function validateEmail(email: string): string {
   const [local, domain] = email.split("@");
 
   if (!local) {
-    return "Please enter a valid email address.\nThe part before '@' cannot be empty.\n\nExample: habiba@gmail.com";
+    return "Please enter a valid email address.\nThe part before '@' cannot be empty.\n\nExample: abc@gmail.com";
   }
   if (!domain) {
-    return "Please enter a valid email address.\nPlease enter the domain name after '@'.\n\nExample: habiba@gmail.com";
+    return "Please enter a valid email address.\nPlease enter the domain name after '@'.\n\nExample: abc@gmail.com";
   }
   if (email.includes("..")) {
     return "Please enter a valid email address.\nConsecutive dots are not allowed.";
   }
   if (!domain.includes(".")) {
-    return "Please enter a valid email address.\nThe domain is incomplete.\n\nExample: habiba@gmail.com";
+    return "Please enter a valid email address.\nThe domain is incomplete.\n\nExample: abc@gmail.com";
   }
   if (domain.endsWith(".")) {
-    return "Please enter a valid email address.\nThe domain extension is missing.\n\nExample: habiba@gmail.com";
+    return "Please enter a valid email address.\nThe domain extension is missing.\n\nExample: abc@gmail.com";
   }
   if (!/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(email)) {
     return "Please enter a valid email address.\nThe email contains invalid characters.";
@@ -51,7 +54,7 @@ function validateEmail(email: string): string {
   return "";
 }
 
-export default function LoginForm() {
+export default function LoginForm({ portal = "user" }: { portal?: LoginPortal }) {
   const router = useRouter();
 
   const [formData, setFormData] = useState({
@@ -140,7 +143,10 @@ const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
       const res = await fetch(`${API_BASE_URL}/api/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(formData),
+        body: JSON.stringify({
+          ...formData,
+          portal,
+        }),
         credentials: "include",
       });
 
@@ -154,8 +160,16 @@ const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
         return;
       }
 
-      router.push("/dashboard");
-    } catch (err) {
+      const isAdmin = Boolean(data?.user?.isAdmin);
+      const redirectPath = portal === "admin"
+        ? "/admin/faqs"
+        : isAdmin
+          ? "/admin/faqs"
+          : "/dashboard";
+
+      router.push(redirectPath);
+      router.refresh();
+    } catch {
       setErrors((prev) => ({
         ...prev,
         general: "Could not reach the server. Please try again.",
@@ -166,6 +180,7 @@ const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
   };
 
   return (
+    
     <form
       onSubmit={handleSubmit}
       className="space-y-5"
@@ -176,7 +191,6 @@ const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
           {errors.general}
         </div>
       )}
-
       <Input
         type="email"
         name="email"
@@ -186,6 +200,7 @@ const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
         onChange={handleChange}
         error={errors.email}
         required
+        autoComplete="email"
       />
 
       <Input
@@ -197,6 +212,7 @@ const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
         onChange={handleChange}
         error={errors.password}
         required
+        autoComplete="current-password"
       />
 
       <div className="flex items-center justify-between text-sm">
@@ -218,21 +234,42 @@ const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
 
       <div className="transition-transform duration-200 hover:scale-[1.01]">
         <Button
-          text={isSubmitting ? "Logging in..." : "Login"}
+          text={
+            isSubmitting
+              ? "Logging in..."
+              : portal === "admin"
+                ? "Admin Login"
+                : "Login"
+          }
           type="submit"
           disabled={isSubmitting}
         />
       </div>
 
       <p className="text-center text-gray-600">
-        Dont have an account?{" "}
-        <Link
-          href="/register"
-          className="font-semibold text-blue-600 transition hover:text-blue-800 hover:underline"
-        >
-          Register
-        </Link>
+        {portal === "admin" ? (
+          <>
+            Go to user login?{" "}
+            <Link
+              href="/login"
+              className="font-semibold text-blue-600 transition hover:text-blue-800 hover:underline"
+            >
+              User Login
+            </Link>
+          </>
+        ) : (
+          <>
+            Dont have an account?{" "}
+            <Link
+              href="/register"
+              className="font-semibold text-blue-600 transition hover:text-blue-800 hover:underline"
+            >
+              Register
+            </Link>
+          </>
+        )}
       </p>
+
     </form>
   );
 }

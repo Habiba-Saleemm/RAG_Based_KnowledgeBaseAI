@@ -10,6 +10,8 @@ import Button from "../ui/Button";
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
 
+type RegisterPortal = "user" | "admin";
+
 // Detailed, per-case email validation (matches backend validators.py exactly)
 function validateEmail(email: string): string {
   if (!email.trim()) return "Please enter your email.";
@@ -51,7 +53,7 @@ function validateEmail(email: string): string {
   return "";
 }
 
-export default function RegisterForm() {
+export default function RegisterForm({ portal = "user" }: { portal?: RegisterPortal }) {
   const router = useRouter();
 
   const [formData, setFormData] = useState({
@@ -59,6 +61,7 @@ export default function RegisterForm() {
     email: "",
     password: "",
     confirmPassword: "",
+    adminKey: "",
   });
 
   const [errors, setErrors] = useState({
@@ -66,6 +69,7 @@ export default function RegisterForm() {
     email: "",
     password: "",
     confirmPassword: "",
+    adminKey: "",
     general: "",
   });
 
@@ -109,6 +113,7 @@ const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
       email: "",
       password: "",
       confirmPassword: "",
+      adminKey: "",
       general: "",
     };
 
@@ -187,6 +192,11 @@ const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
       valid = false;
     }
 
+    if (portal === "admin" && !formData.adminKey.trim()) {
+      newErrors.adminKey = "Please enter the admin registration key.";
+      valid = false;
+    }
+
     setErrors(newErrors);
 
     return valid;
@@ -194,6 +204,12 @@ const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
 
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+
+    // special-case: both password fields empty -> show combined message
+    if (!formData.password.trim() && !formData.confirmPassword.trim()) {
+      setErrors((prev) => ({ ...prev, password: "Password fields cannot be empty.", confirmPassword: "Password fields cannot be empty." }));
+      return;
+    }
 
     if (!validate()) return;
 
@@ -204,7 +220,10 @@ const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
       const res = await fetch(`${API_BASE_URL}/api/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(formData),
+        body: JSON.stringify({
+          ...formData,
+          portal,
+        }),
       });
 
       const data = await res.json();
@@ -219,7 +238,7 @@ const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
         return;
       }
 
-      router.push("/login");
+      router.push(portal === "admin" ? "/admin/login" : "/login");
     } catch (err) {
       setErrors((prev) => ({
         ...prev,
@@ -247,6 +266,7 @@ const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
         onChange={handleChange}
         error={errors.name}
         required
+        autoComplete="name"
       />
 
       <Input
@@ -258,6 +278,7 @@ const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
         onChange={handleChange}
         error={errors.email}
         required
+        autoComplete="email"
       />
 
       <Input
@@ -269,6 +290,7 @@ const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
         onChange={handleChange}
         error={errors.password}
         required
+        autoComplete="new-password"
       />
 
       <Input
@@ -280,25 +302,61 @@ const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
         onChange={handleChange}
         error={errors.confirmPassword}
         required
+        autoComplete="new-password"
       />
+
+      {portal === "admin" && (
+        <Input
+          type="password"
+          name="adminKey"
+          label="Admin Registration Key"
+          placeholder="Enter admin key"
+          value={formData.adminKey}
+          onChange={handleChange}
+          error={errors.adminKey}
+          required
+          autoComplete="off"
+        />
+      )}
 
       <div className="transition-transform duration-200 hover:scale-[1.01]">
         <Button
-          text={isSubmitting ? "Creating account..." : "Register"}
+          text={
+            isSubmitting
+              ? "Creating account..."
+              : portal === "admin"
+                ? "Admin Register"
+                : "Register"
+          }
           type="submit"
           disabled={isSubmitting}
         />
       </div>
 
       <p className="text-center text-gray-600">
-        Already have an account?{" "}
-        <Link
-          href="/login"
-          className="font-semibold text-blue-600 transition hover:text-blue-800 hover:underline"
-        >
-          Login
-        </Link>
+        {portal === "admin" ? (
+          <>
+            Already have an admin account?{" "}
+            <Link
+              href="/admin/login"
+              className="font-semibold text-blue-600 transition hover:text-blue-900 hover:underline"
+            >
+              Admin Login
+            </Link>
+          </>
+        ) : (
+          <>
+            Already have an account?{" "}
+            <Link
+              href="/login"
+              className="font-semibold text-blue-600 transition hover:text-blue-900 hover:underline"
+            >
+              Login
+            </Link>
+          </>
+        )}
       </p>
+
     </form>
   );
 }

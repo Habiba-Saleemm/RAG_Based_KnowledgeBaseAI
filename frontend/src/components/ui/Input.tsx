@@ -12,6 +12,7 @@ interface InputProps {
   error?: string;
   required?: boolean;
   disabled?: boolean;
+  autoComplete?: string;
 }
 
 export default function Input({
@@ -24,6 +25,7 @@ export default function Input({
   error,
   required = false,
   disabled = false,
+  autoComplete,
 }: InputProps) {
   const [showPassword, setShowPassword] = useState(false);
 
@@ -55,6 +57,7 @@ export default function Input({
           onChange={onChange}
           required={required}
           disabled={disabled}
+          autoComplete={autoComplete}
           className={`
             w-full
             rounded-xl
