@@ -5,10 +5,11 @@ import { usePathname } from "next/navigation";
 
 const navLinks = [
   { href: "/dashboard", label: "Dashboard" },
-  { href: "/admin/faqs", label: "Admin FAQs" },
-  { href: "/admin/chat", label: "AI Chat" },   
-  { href: "/about2", label: "About" },
-  { href: "/admin/users", label: "Users" }
+  { href: "/admin/users", label: "Users" },
+  { href: "/admin/chat", label: "AI Chat" },  
+  { href: "/admin/faqs", label: "Admin FAQs" }, 
+  { href: "/about", label: "About" },
+  { href: "/admin/history", label: "History" },
 ];
 
 export default function HeaderNavAdmin() {

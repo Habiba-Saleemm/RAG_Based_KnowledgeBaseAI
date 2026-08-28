@@ -27,3 +27,35 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 GRANT SELECT, INSERT, DELETE ON authdb.sessions TO 'authapp'@'localhost';
 FLUSH PRIVILEGES;
+
+GRANT ALTER ON authdb.users TO 'authapp'@'localhost';
+FLUSH PRIVILEGES;
+
+GRANT ALL PRIVILEGES ON authdb.* TO 'authapp'@'localhost';
+FLUSH PRIVILEGES;
+
+ALTER TABLE document_chunks ADD COLUMN question TEXT NULL;
+
+DELETE FROM document_chunks WHERE document_id = 4;
+DELETE FROM documents WHERE id = 4;
+
+select * from users;
+
+DELETE FROM users 
+WHERE id IN (3, 6, 8);
+
+SELECT * FROM users ORDER BY id ASC;
+
+ALTER TABLE users ADD COLUMN can_upload_documents BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN can_use_ai_chat BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE users ADD COLUMN can_manage_faqs BOOLEAN NOT NULL DEFAULT FALSE;
+
+SELECT id, name, email FROM users ORDER BY id;
+
+DROP TABLE document_chunks;
+DROP TABLE documents;
+
+SELECT * FROM documents WHERE filename = 'test.txt';
+
+
+SHOW TABLES;

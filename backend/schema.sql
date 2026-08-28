@@ -57,3 +57,60 @@ CREATE USER IF NOT EXISTS 'authapp'@'localhost' IDENTIFIED BY 'StrongPassword123
 GRANT SELECT, INSERT, UPDATE ON authdb.users TO 'authapp'@'localhost';
 GRANT SELECT, INSERT, DELETE ON authdb.sessions TO 'authapp'@'localhost';
 FLUSH PRIVILEGES;
+
+
+
+CREATE TABLE documents (
+    id INT NOT NULL AUTO_INCREMENT,
+    filename VARCHAR(255) NOT NULL,
+    content_hash VARCHAR(64) NOT NULL,
+    uploaded_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    INDEX ix_documents_id (id),
+    INDEX ix_documents_content_hash (content_hash)
+);
+
+CREATE TABLE document_chunks (
+    id INT NOT NULL AUTO_INCREMENT,
+    document_id INT NOT NULL,
+    question TEXT NULL,
+    chunk_text TEXT NOT NULL,
+    embedding TEXT NOT NULL,
+    chunk_index INT NOT NULL,
+    PRIMARY KEY (id),
+    INDEX ix_document_chunks_id (id),
+    INDEX ix_document_chunks_document_id (document_id)
+);
+
+CREATE TABLE user_logs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    action VARCHAR(100) NOT NULL,
+    details TEXT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+select * from documents;
+
+DROP TABLE document_chunks;
+
+SELECT id, filename, content_hash FROM documents;
+
+SELECT COUNT(*) FROM document_chunks;
+
+SELECT COUNT(*) FROM document_chunks WHERE document_id = 4;
+
+delete from documents where id = 4;
+SELECT id, document_id, question, LEFT(chunk_text, 50), content_hash FROM document_chunks LIMIT 10;
+
+SELECT question, chunk_text FROM document_chunks 
+WHERE document_id = 4 AND question LIKE '%annual paid leave%';
+
+
+SELECT id, question FROM document_chunks WHERE document_id = 4 ORDER BY id;
+
+SELECT * FROM user_logs ORDER BY created_at DESC;
+
+SELECT DISTINCT user_id FROM user_logs;
+
+SELECT * FROM user_logs ORDER BY created_at DESC;

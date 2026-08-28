@@ -11,6 +11,9 @@ import random
 import hashlib
 from datetime import datetime, timedelta
 from urllib import request
+
+from sympy import true
+import db
 from models import FAQ
 
 import bcrypt
@@ -23,9 +26,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from embeddings import embed_text, serialize_embedding, find_best_faq_match, find_best_match, is_greeting, GREETING_RESPONSE
 from about_content import ABOUT_KNOWLEDGE
-from models import FAQ, Document, DocumentChunk
+from models import FAQ, Document, DocumentChunk, UserLog, ChatHistory
 from schemas import DocumentResponse
 from document_processing import extract_text, chunk_text, extract_qa_pairs
+from chroma_client import get_collection
 
 
 from database import Base, engine, get_db
@@ -47,6 +51,9 @@ from schemas import (
 )
 from validators import validate_email, validate_password, validate_name
 
+from zoneinfo import ZoneInfo
+KARACHI_TZ = ZoneInfo("Asia/Karachi")
+
 load_dotenv()
 
 app = FastAPI(title="Auth API")
@@ -56,9 +63,12 @@ ADMIN_REGISTRATION_KEY = os.getenv("ADMIN_REGISTRATION_KEY", "")
 COOKIE_SECURE = FRONTEND_ORIGIN.startswith("https://")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_ORIGIN],
+    allow_origins=[    
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -81,6 +91,11 @@ def error_response(errors: dict, status_code: int):
 def hash_token(raw_token: str) -> str:
     """We only ever store a SHA-256 hash of a session token, never the raw value."""
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+def hash_chunk_content(question: str | None, chunk_text: str) -> str:
+    """Hash a chunk's identity content so we can detect if it changed on re-upload."""
+    combined = f"{question or ''}||{chunk_text}"
+    return hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
 
 def is_admin_user(user: dict) -> bool:
@@ -189,6 +204,22 @@ def require_permission(request: Request, permission_name: str):
 
 ensure_users_role_column()
 
+# Will store log details for each user
+def create_user_log(
+    db: Session,
+    user_id: int,
+    action: str,
+    details: str | None = None
+):
+    log = UserLog(
+        user_id=user_id,
+        action=action,
+        details=details
+    )
+
+    db.add(log)
+    db.commit()
+
 
 # ---------------------------------------------------------------------------
 # REGISTER
@@ -275,7 +306,7 @@ def register(payload: RegisterRequest):
 # LOGIN
 # ---------------------------------------------------------------------------
 @app.post("/api/login")
-def login(payload: LoginRequest):
+def login(payload: LoginRequest, db: Session = Depends(get_db)):
     email = payload.email.strip().lower()
     password = payload.password
     portal = payload.portal.strip().lower() if payload.portal else "user"
@@ -359,6 +390,7 @@ def login(payload: LoginRequest):
         # Real, server-verifiable session: store a hash of a fresh token
         # and hand the raw token to the browser as the cookie.
         raw_token = create_session(cursor, conn, user["id"])
+        create_user_log(db, user["id"], "login", "User logged in successfully.")
         cursor.close()
 
 
@@ -397,7 +429,9 @@ def login(payload: LoginRequest):
 # LOGOUT
 # ---------------------------------------------------------------------------
 @app.post("/api/logout")
-def logout(request: Request):
+def logout(request: Request, db: Session = Depends(get_db)):
+    
+    user = get_current_user(request)
     raw_token = request.cookies.get("session_token")
     if raw_token:
         conn = None
@@ -426,6 +460,13 @@ def logout(request: Request):
         samesite="lax",
         path="/",
     )
+    if user:
+     create_user_log(
+        db,
+        user["id"],
+        "LOGOUT",
+        "User logged out."
+    )
     return response
 
 
@@ -452,7 +493,7 @@ def list_faqs(db: Session = Depends(get_db)):
 
 @app.post("/api/faqs", response_model=FAQResponse, status_code=201)
 def create_faq(payload: FAQCreate, request: Request, db: Session = Depends(get_db)):
-    require_permission(request, "canManageFAQs")
+    current_user = require_permission(request, "canManageFAQs")
     question = payload.question.strip()
     faq = FAQ(
         question=question,
@@ -467,7 +508,23 @@ def create_faq(payload: FAQCreate, request: Request, db: Session = Depends(get_d
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to create FAQ.") from exc
 
+    # Keep Chroma in sync
+    get_collection().upsert(
+        ids=[f"faq_{faq.id}"],
+        embeddings=[embed_text(question)],
+        documents=[faq.answer],
+        metadatas=[{"source": "faq", "sql_id": faq.id, "question": question}],
+    )
+
+    create_user_log(
+        db,
+        current_user["id"],
+        "add_faq",
+        f"Added FAQ: {question}"
+    )
+
     return faq
+
 
 @app.get("/api/admin/users")
 def list_users(request: Request):
@@ -490,8 +547,9 @@ def list_users(request: Request):
     return JSONResponse(content={"success": True, "users": users})
 
 
+
 @app.put("/api/admin/users/{user_id}")
-def update_user(user_id: int, payload: AdminUpdateUserRequest, request: Request):
+def update_user(user_id: int, payload: AdminUpdateUserRequest, request: Request, db: Session = Depends(get_db)):
     current_admin = require_admin(request)
 
     email = payload.email.strip().lower()
@@ -510,7 +568,19 @@ def update_user(user_id: int, payload: AdminUpdateUserRequest, request: Request)
     conn = None
     try:
         conn = get_connection()
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
+
+        # Fetch current values BEFORE updating, so we can diff afterward
+        cursor.execute(
+            "SELECT name, email, role, can_upload_documents, can_use_ai_chat, can_manage_faqs "
+            "FROM users WHERE id = %s",
+            (user_id,),
+        )
+        old_user = cursor.fetchone()
+        if not old_user:
+            cursor.close()
+            raise HTTPException(status_code=404, detail="User not found.")
+
         cursor.execute(
             """UPDATE users
                SET name = %s, email = %s, role = %s,
@@ -526,11 +596,37 @@ def update_user(user_id: int, payload: AdminUpdateUserRequest, request: Request)
                 user_id,
             ),
         )
-        if cursor.rowcount == 0:
-            cursor.close()
-            raise HTTPException(status_code=404, detail="User not found.")
         conn.commit()
         cursor.close()
+
+        # Build a diff-based log message — only mention what actually changed
+        changes = []
+        if old_user["name"] != payload.name.strip():
+            changes.append(f"Name changed from {old_user['name']} to {payload.name.strip()}")
+        if old_user["email"] != email:
+            changes.append(f"Email changed from {old_user['email']} to {email}")
+        if old_user["role"] != payload.role:
+            changes.append(f"Role changed from {old_user['role']} to {payload.role}")
+        if bool(old_user["can_upload_documents"]) != payload.can_upload_documents:
+            changes.append(
+                f"Can Upload Documents changed from {'Yes' if old_user['can_upload_documents'] else 'No'} "
+                f"to {'Yes' if payload.can_upload_documents else 'No'}"
+            )
+        if bool(old_user["can_use_ai_chat"]) != payload.can_use_ai_chat:
+            changes.append(
+                f"Can Use AI Chat changed from {'Yes' if old_user['can_use_ai_chat'] else 'No'} "
+                f"to {'Yes' if payload.can_use_ai_chat else 'No'}"
+            )
+        if bool(old_user["can_manage_faqs"]) != payload.can_manage_faqs:
+            changes.append(
+                f"Can Manage FAQs changed from {'Yes' if old_user['can_manage_faqs'] else 'No'} "
+                f"to {'Yes' if payload.can_manage_faqs else 'No'}"
+            )
+
+        if changes:
+            log_message = "; ".join(changes)
+            create_user_log(db, current_admin["id"], "edit_user", log_message)
+
     except mysql.connector.IntegrityError:
         return error_response({"email": "An account with this email already exists."}, 409)
     except mysql.connector.Error:
@@ -552,9 +648,10 @@ def update_user(user_id: int, payload: AdminUpdateUserRequest, request: Request)
             "can_manage_faqs": payload.can_manage_faqs,
         },
     }
+
     
 @app.delete("/api/admin/users/{user_id}")
-def delete_user(user_id: int, request: Request):
+def delete_user(user_id: int, request: Request, db: Session = Depends(get_db)):
     current_admin = require_admin(request)
 
     if current_admin["id"] == user_id:
@@ -570,6 +667,13 @@ def delete_user(user_id: int, request: Request):
             raise HTTPException(status_code=404, detail="User not found.")
         conn.commit()
         cursor.close()
+
+        create_user_log(
+            db,
+            current_admin["id"],
+            "delete_user",
+            f"Deleted user with id {user_id}"
+        )
     except mysql.connector.Error:
         return error_response({"general": "Server error. Please try again."}, 500)
     finally:
@@ -580,8 +684,8 @@ def delete_user(user_id: int, request: Request):
 
 
 @app.post("/api/admin/users", status_code=201)
-def create_user(payload: AdminCreateUserRequest, request: Request):
-    require_admin(request)
+def create_user(payload: AdminCreateUserRequest, request: Request, db: Session = Depends(get_db)):
+    current_admin = require_admin(request)
 
     email = payload.email.strip().lower()
     email_error = validate_email(email)
@@ -619,6 +723,13 @@ def create_user(payload: AdminCreateUserRequest, request: Request):
         conn.commit()
         new_id = cursor.lastrowid
         cursor.close()
+
+        create_user_log(
+            db,
+            current_admin["id"],
+            "add_user",
+            f"Created user: {payload.name.strip()} ({email})"
+        )
     except mysql.connector.IntegrityError:
         return error_response({"email": "An account with this email already exists."}, 409)
     except mysql.connector.Error:
@@ -639,6 +750,31 @@ def create_user(payload: AdminCreateUserRequest, request: Request):
             "can_use_ai_chat": payload.can_use_ai_chat,
             "can_manage_faqs": payload.can_manage_faqs,
         },
+    }
+
+#HISTORY
+@app.get("/api/admin/history")
+def get_admin_history(request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+
+    logs = (
+        db.query(UserLog)
+        .order_by(UserLog.created_at.desc())
+        .all()
+    )
+
+    return {
+        "success": True,
+        "logs": [
+            {
+                "id": log.id,
+                "user_id": log.user_id,
+                "action": log.action,
+                "details": log.details,
+                "created_at": log.created_at.isoformat() if log.created_at else None,
+            }
+            for log in logs
+        ],
     }
 
 #UPDATE FAQ
@@ -667,6 +803,14 @@ def update_faq(
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update FAQ.") from exc
 
+    # Keep Chroma in sync
+    get_collection().upsert(
+        ids=[f"faq_{faq.id}"],
+        embeddings=[embed_text(new_question)],
+        documents=[faq.answer],
+        metadatas=[{"source": "faq", "sql_id": faq.id, "question": new_question}],
+    )
+
     return faq
 
 # ---------------------------------------------------------------------------
@@ -679,7 +823,7 @@ async def upload_document(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    require_permission(request, "canUploadDocuments")
+    current_user = require_permission(request, "canUploadDocuments")
 
     filename = file.filename or "untitled"
     extension = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
@@ -690,8 +834,11 @@ async def upload_document(
         )
 
     file_bytes = await file.read()
+
     if len(file_bytes) > MAX_UPLOAD_SIZE_BYTES:
         raise HTTPException(status_code=400, detail="File is too large (max 10MB).")
+
+    new_hash = hashlib.sha256(file_bytes).hexdigest()
 
     try:
         text = extract_text(filename, file_bytes)
@@ -700,44 +847,109 @@ async def upload_document(
             status_code=400, detail=f"Could not read file: {exc}"
         ) from exc
 
-    document = Document(filename=filename)
-    db.add(document)
-    db.flush()  # assigns document.id without committing yet
+    existing_document = db.query(Document).filter(Document.filename == filename).first()
+
+    if existing_document and existing_document.content_hash == new_hash:
+        # Identical content already stored — nothing to reprocess.
+        existing_chunk_count = (
+            db.query(DocumentChunk)
+            .filter(DocumentChunk.document_id == existing_document.id)
+            .count()
+        )
+        return DocumentResponse(
+            id=existing_document.id,
+            filename=existing_document.filename,
+            uploaded_at=existing_document.uploaded_at,
+            chunk_count=existing_chunk_count,
+        )
+
+    if existing_document:
+        existing_document.content_hash = new_hash
+        document = existing_document
+    else:
+        document = Document(filename=filename, content_hash=new_hash)
+        db.add(document)
+        db.flush()
+
+    new_chunks_data = []
 
     qa_pairs = extract_qa_pairs(text)
 
+    print(f"DEBUG: text length = {len(text)}, qa_pairs found = {len(qa_pairs)}")
     if qa_pairs:
-        # Structured Q&A content — embed just the question, same as FAQs.
-        for index, pair in enumerate(qa_pairs):
-            db.add(
-                DocumentChunk(
-                    document_id=document.id,
-                    question=pair["question"],
-                    chunk_text=pair["answer"],
-                    embedding=serialize_embedding(embed_text(pair["question"])),
-                    chunk_index=index,
-                )
-            )
-        piece_count = len(qa_pairs)
+        for pair in qa_pairs:
+            new_chunks_data.append({
+                "question": pair["question"],
+                "chunk_text": pair["answer"],
+                "content_hash": hash_chunk_content(pair["question"], pair["answer"]),
+            })
     else:
-        # Unstructured content — fall back to generic paragraph chunking,
-        # embedding each chunk's own content directly.
         pieces = chunk_text(text)
         if not pieces:
             raise HTTPException(
                 status_code=400, detail="No readable text found in this file."
             )
-        for index, piece in enumerate(pieces):
-            db.add(
-                DocumentChunk(
-                    document_id=document.id,
-                    question=None,
-                    chunk_text=piece,
-                    embedding=serialize_embedding(embed_text(piece)),
-                    chunk_index=index,
-                )
-            )
-        piece_count = len(pieces)
+        for piece in pieces:
+            new_chunks_data.append({
+                "question": None,
+                "chunk_text": piece,
+                "content_hash": hash_chunk_content(None, piece),
+            })
+
+    # ---------------------------------------------------------------
+    # Reconcile chunks against MySQL (existing behavior), and build up
+    # matching add/delete lists so Chroma stays in sync after commit.
+    # ---------------------------------------------------------------
+    existing_chunks = db.query(DocumentChunk).filter(
+        DocumentChunk.document_id == document.id
+    ).all()
+    existing_by_hash = {c.content_hash: c for c in existing_chunks}
+    new_hashes = {c["content_hash"] for c in new_chunks_data}
+
+    chroma_ids_to_delete = []
+    for old_chunk in existing_chunks:
+        if old_chunk.content_hash not in new_hashes:
+            chroma_ids_to_delete.append(f"doc_{old_chunk.id}")
+            db.delete(old_chunk)
+
+    next_index = 0
+    piece_count = 0
+    chroma_ids, chroma_embeddings, chroma_documents, chroma_metadatas = [], [], [], []
+
+    for chunk_data in new_chunks_data:
+        piece_count += 1
+        if chunk_data["content_hash"] in existing_by_hash:
+            next_index += 1
+            continue
+
+        text_to_embed = chunk_data["question"] or chunk_data["chunk_text"]
+        embedding_vector = embed_text(text_to_embed)
+
+        new_chunk = DocumentChunk(
+            document_id=document.id,
+            question=chunk_data["question"],
+            chunk_text=chunk_data["chunk_text"],
+            embedding=serialize_embedding(embedding_vector),
+            chunk_index=next_index,
+            content_hash=chunk_data["content_hash"],
+        )
+        db.add(new_chunk)
+        db.flush()  # need new_chunk.id before we can build the Chroma id
+
+        chroma_ids.append(f"doc_{new_chunk.id}")
+        chroma_embeddings.append(embedding_vector)
+        chroma_documents.append(chunk_data["chunk_text"])
+        chroma_metadatas.append({
+            "source": "document",
+            "sql_id": new_chunk.id,
+            "question": chunk_data["question"] or "",
+            "document_id": document.id,
+            "filename": document.filename,
+        })
+
+        next_index += 1
+
+    print(f"DEBUG: new_chunks_data count = {len(new_chunks_data)}, piece_count = {piece_count}")
 
     try:
         db.commit()
@@ -746,14 +958,36 @@ async def upload_document(
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to save document.") from exc
 
-    return DocumentResponse(
-        id=document.id,
-        filename=document.filename,
-        uploaded_at=document.uploaded_at,
-        chunk_count=piece_count,
+    # Keep Chroma in sync — do this AFTER commit succeeds, so Chroma never
+    # gets ahead of MySQL if the commit fails.
+    collection = get_collection()
+    if chroma_ids_to_delete:
+        collection.delete(ids=chroma_ids_to_delete)
+    if chroma_ids:
+        collection.upsert(
+            ids=chroma_ids,
+            embeddings=chroma_embeddings,
+            documents=chroma_documents,
+            metadatas=chroma_metadatas,
+        )
+
+    create_user_log(
+        db,
+        current_user["id"],
+        "upload",
+        f"Uploaded document: {filename}"
     )
 
-
+    return DocumentResponse(
+            id=document.id,
+            filename=document.filename,
+            uploaded_at=(
+                document.uploaded_at.replace(tzinfo=ZoneInfo("UTC")).astimezone(KARACHI_TZ)
+                if document.uploaded_at
+                else None
+            ),
+            chunk_count=piece_count,
+        )
 # ---------------------------------------------------------------------------
 # LIST DOCUMENTS — admin-only, so admins can see what's been uploaded.
 # ---------------------------------------------------------------------------
@@ -768,22 +1002,99 @@ def list_documents(request: Request, db: Session = Depends(get_db)):
             DocumentResponse(
                 id=doc.id,
                 filename=doc.filename,
-                uploaded_at=doc.uploaded_at,
+                uploaded_at=(
+                    doc.uploaded_at.replace(tzinfo=ZoneInfo("UTC")).astimezone(KARACHI_TZ)
+                    if doc.uploaded_at
+                    else None
+                ),
                 chunk_count=count,
             )
         )
     return result
-
-
 # ---------------------------------------------------------------------------
 # DELETE DOCUMENT — admin-only, removes the document and all its chunks.
 # ---------------------------------------------------------------------------
+@app.get("/api/admin/chroma-health")
+def chroma_health(request: Request, db: Session = Depends(get_db)):
+    """
+    Debug/health-check route: compares counts between MySQL and Chroma
+    so you can catch drift (e.g. a row that exists in one but not the other).
+    """
+    require_admin(request)
+
+    collection = get_collection()
+
+    mysql_faq_count = db.query(FAQ).count()
+    mysql_chunk_count = db.query(DocumentChunk).count()
+
+    chroma_total_count = collection.count()
+
+    chroma_faq_count = len(
+        collection.get(where={"source": "faq"})["ids"]
+    )
+    chroma_document_count = len(
+        collection.get(where={"source": "document"})["ids"]
+    )
+    chroma_about_count = len(
+        collection.get(where={"source": "about"})["ids"]
+    )
+
+    # Find MySQL FAQ ids that are missing from Chroma
+    mysql_faq_ids = {f.id for f in db.query(FAQ.id).all()}
+    chroma_faq_ids = {
+        meta["sql_id"]
+        for meta in collection.get(where={"source": "faq"})["metadatas"]
+    }
+    missing_faqs_in_chroma = sorted(mysql_faq_ids - chroma_faq_ids)
+    orphaned_faqs_in_chroma = sorted(chroma_faq_ids - mysql_faq_ids)
+
+    # Find MySQL DocumentChunk ids that are missing from Chroma
+    mysql_chunk_ids = {c.id for c in db.query(DocumentChunk.id).all()}
+    chroma_chunk_ids = {
+        meta["sql_id"]
+        for meta in collection.get(where={"source": "document"})["metadatas"]
+    }
+    missing_chunks_in_chroma = sorted(mysql_chunk_ids - chroma_chunk_ids)
+    orphaned_chunks_in_chroma = sorted(chroma_chunk_ids - mysql_chunk_ids)
+
+    in_sync = (
+        not missing_faqs_in_chroma
+        and not orphaned_faqs_in_chroma
+        and not missing_chunks_in_chroma
+        and not orphaned_chunks_in_chroma
+    )
+
+    return {
+        "success": True,
+        "in_sync": in_sync,
+        "counts": {
+            "mysql_faqs": mysql_faq_count,
+            "mysql_document_chunks": mysql_chunk_count,
+            "chroma_total": chroma_total_count,
+            "chroma_faqs": chroma_faq_count,
+            "chroma_documents": chroma_document_count,
+            "chroma_about": chroma_about_count,
+        },
+        "drift": {
+            "faqs_missing_from_chroma": missing_faqs_in_chroma,
+            "faqs_orphaned_in_chroma": orphaned_faqs_in_chroma,
+            "chunks_missing_from_chroma": missing_chunks_in_chroma,
+            "chunks_orphaned_in_chroma": orphaned_chunks_in_chroma,
+        },
+    }
+
+
 @app.delete("/api/documents/{document_id}")
 def delete_document(document_id: int, request: Request, db: Session = Depends(get_db)):
     require_admin(request)
     document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found.")
+
+    chunk_ids = [
+        c.id for c in
+        db.query(DocumentChunk).filter(DocumentChunk.document_id == document_id).all()
+    ]
 
     db.query(DocumentChunk).filter(DocumentChunk.document_id == document_id).delete()
     db.delete(document)
@@ -793,35 +1104,33 @@ def delete_document(document_id: int, request: Request, db: Session = Depends(ge
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to delete document.") from exc
 
+    # Keep Chroma in sync
+    if chunk_ids:
+        get_collection().delete(ids=[f"doc_{cid}" for cid in chunk_ids])
+
     return {"success": True, "message": "Document deleted successfully."}
 
 
 # Matching Best Find FAQs
-
 @app.post("/api/ask", response_model=AskResponse)
-def ask(payload: AskRequest, db: Session = Depends(get_db)):
-    require_permission(request, "can_use_ai_chat")
+def ask(payload: AskRequest, request: Request, db: Session = Depends(get_db)):
+    current_user = require_permission(request, "can_use_ai_chat")
+
     if is_greeting(payload.question):
         return AskResponse(answer=GREETING_RESPONSE)
 
-    faqs = db.query(FAQ).all()
-    faq_dicts = [
-        {"id": f.id, "question": f.question, "answer": f.answer, "embedding": f.embedding}
-        for f in faqs
-    ]
-
-    chunks = db.query(DocumentChunk).all()
-    chunk_dicts = [
-    {"question": c.question, "answer": c.chunk_text, "embedding": c.embedding}
-    for c in chunks
-]
-    combined_knowledge = faq_dicts + ABOUT_KNOWLEDGE + chunk_dicts
-    match = find_best_match(payload.question, combined_knowledge)
+    match = find_best_match(payload.question)
 
     if not match:
-        return AskResponse(
-            answer="I don't have information on that yet. Try rephrasing, or check the FAQ page for topics I do know about.",
-        )
+        answer_text = "I don't have information on that yet. Try rephrasing, or check the FAQ page for topics I do know about."
+        chat = ChatHistory(user_id=current_user["id"], question=payload.question, answer=answer_text)
+        db.add(chat)
+        db.commit()
+        return AskResponse(answer=answer_text)
+
+    chat = ChatHistory(user_id=current_user["id"], question=payload.question, answer=match["answer"])
+    db.add(chat)
+    db.commit()
 
     return AskResponse(
         answer=match["answer"],
@@ -829,12 +1138,15 @@ def ask(payload: AskRequest, db: Session = Depends(get_db)):
         confidence=round(match["score"], 3),
     )
 
+
 @app.delete("/api/faqs/{faq_id}")
 def delete_faq(faq_id: int, request: Request, db: Session = Depends(get_db)):
-    require_permission(request, "can_manage_faqs")
+    current_user = require_permission(request, "can_manage_faqs")
     faq = db.query(FAQ).filter(FAQ.id == faq_id).first()
     if not faq:
         raise HTTPException(status_code=404, detail="FAQ not found.")
+
+    faq_question = faq.question  # capture before delete
 
     db.delete(faq)
     try:
@@ -843,10 +1155,17 @@ def delete_faq(faq_id: int, request: Request, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to delete FAQ.") from exc
 
-    # TODO: Hook RAG pipeline here (re-embed/remove this FAQ after delete).
+    # Keep Chroma in sync
+    get_collection().delete(ids=[f"faq_{faq_id}"])
+
+    create_user_log(
+        db,
+        current_user["id"],
+        "remove_faq",
+        f"Removed FAQ: {faq_question}"
+    )
+
     return {"success": True, "message": "FAQ deleted successfully."}
-
-
     
 # ---------------------------------------------------------------------------
 # FORGOT PASSWORD — generate 6-digit PIN and save in DB
@@ -1018,3 +1337,230 @@ def update_password(payload: UpdatePasswordRequest):
     return JSONResponse(
         content={"success": True, "message": "Password updated successfully."}
     )
+
+@app.get("/api/admin/users/{user_id}/logs")
+def get_user_logs(user_id: int, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+
+    logs = (
+        db.query(UserLog)
+        .filter(UserLog.user_id == user_id)
+        .order_by(UserLog.created_at.desc())
+        .all()
+    )
+
+    return {
+        "success": True,
+        "logs": [
+            {
+                "id": log.id,
+                "action": log.action,
+                "description": log.details,
+                "created_at": log.created_at.isoformat()
+                if log.created_at
+                else None,
+            }
+            for log in logs
+        ],
+    }
+    
+@app.get("/api/admin/users/{user_id}/chat-history")
+def get_user_chat_history(user_id: int, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+
+    chats = (
+        db.query(ChatHistory)
+        .filter(ChatHistory.user_id == user_id)
+        .order_by(ChatHistory.created_at.desc())
+        .all()
+    )
+
+    return {
+        "success": True,
+        "chats": [
+            {
+                "id": chat.id,
+                "question": chat.question,
+                "answer": chat.answer,
+                "created_at": chat.created_at.isoformat() if chat.created_at else None,
+            }
+            for chat in chats
+        ],
+    }
+    
+@app.get("/api/admin/history/grouped")
+def get_admin_history_grouped(request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+
+    logs = db.query(UserLog).order_by(UserLog.created_at.asc()).all()
+
+    # Get user names in one query
+    user_ids = {log.user_id for log in logs}
+    conn = None
+    names_by_id = {}
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        if user_ids:
+            format_ids = ",".join(str(uid) for uid in user_ids)
+            cursor.execute(f"SELECT id, name FROM users WHERE id IN ({format_ids})")
+            for row in cursor.fetchall():
+                names_by_id[row["id"]] = row["name"]
+        cursor.close()
+    finally:
+        if conn:
+            conn.close()
+
+    grouped: dict[int, dict] = {}
+    result = []
+
+    for log in logs:
+        uid = log.user_id
+        if uid not in grouped:
+            grouped[uid] = {
+                "user_id": uid,
+                "name": names_by_id.get(uid, f"User {uid}"),
+                "logged_in": [],
+                "edited": [],
+                "removed": [],
+                "added": [],
+                "uploaded": [],
+                "details": [],
+            }
+        if log.created_at:
+            local_time = log.created_at.replace(tzinfo=ZoneInfo("UTC")).astimezone(KARACHI_TZ)
+            time_str = local_time.strftime("%H:%M")
+        else:
+            time_str = ""
+
+        if log.action == "login":
+            grouped[uid]["logged_in"].append(time_str)
+        elif log.action == "edit_user":
+            grouped[uid]["edited"].append(log.details or "")
+            grouped[uid]["details"].append(log.details or "")
+        elif log.action in ("remove_faq", "delete_user"):
+            grouped[uid]["removed"].append(log.details or "")
+            grouped[uid]["details"].append(log.details or "")
+        elif log.action in ("add_faq", "add_user"):
+            grouped[uid]["added"].append(log.details or "")
+            grouped[uid]["details"].append(log.details or "")
+        elif log.action == "upload":
+            grouped[uid]["uploaded"].append(log.details or "")
+            grouped[uid]["details"].append(log.details or "")
+
+    for entry in grouped.values():
+        result.append({
+            "user_id": entry["user_id"],
+            "name": entry["name"],
+            "logged_in": ", ".join(entry["logged_in"]) or "—",
+            "edited": "; ".join(filter(None, entry["edited"])) or "—",
+            "removed": "; ".join(filter(None, entry["removed"])) or "—",
+            "added": "; ".join(filter(None, entry["added"])) or "—",
+            "uploaded": "; ".join(filter(None, entry["uploaded"])) or "—",
+            "details": "; ".join(filter(None, entry["details"])) or "—",
+        })
+
+    return {"success": True, "users": result}
+
+
+@app.get("/api/admin/history/table")
+def get_history_table(
+    request: Request,
+    db: Session = Depends(get_db),
+    page: int = 1,
+    page_size: int = 20,
+):
+    require_admin(request)
+
+    logs = (
+        db.query(UserLog)
+        .order_by(UserLog.created_at.desc())
+        .all()
+    )
+
+    user_ids = {log.user_id for log in logs}
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    names = {}
+    emails = {}
+
+    if user_ids:
+        ids = ",".join(str(i) for i in user_ids)
+
+        cursor.execute(
+            f"SELECT id, name, email FROM users WHERE id IN ({ids})"
+        )
+
+        for row in cursor.fetchall():
+            names[row["id"]] = row["name"]
+            emails[row["id"]] = row["email"]
+
+    cursor.close()
+    conn.close()
+
+    rows = []
+
+    for log in logs:
+        # NOTE: removed "if log.action == 'login': continue" here —
+        # that line was hiding every login before it reached row-building.
+
+        row = {
+            "user_id": log.user_id,
+            "name": names.get(log.user_id, ""),
+            "email": emails.get(log.user_id, ""),
+            "edited": "",
+            "removed": "",
+            "added": "",
+            "uploaded": "",
+            "details": log.details or "",
+            "time": (
+                log.created_at
+                .replace(tzinfo=ZoneInfo("UTC"))
+                .astimezone(KARACHI_TZ)
+                .isoformat()
+                if log.created_at
+                else None
+            ),
+        }
+
+        if log.action == "edit_user":
+            row["edited"] = "Yes"
+
+            details = (log.details or "").lower()
+
+            if "can upload documents changed" in details:
+                row["uploaded"] = "Yes"
+        elif log.action == "login":
+            row["edited"] = "No"
+            row["details"] = "Logged in"
+        elif log.action.lower() == "logout":
+            row["edited"] = "No"
+            row["details"] = "Logged out"
+
+        # Skip rows that have no visible action
+        if not any([
+            row["edited"],
+            row["removed"],
+            row["added"],
+            row["uploaded"],
+        ]):
+            continue
+
+        rows.append(row)
+
+    total = len(rows)
+    total_pages = (total + page_size - 1) // page_size if page_size else 1
+    start = (page - 1) * page_size
+    end = start + page_size
+    paginated_rows = rows[start:end]
+
+    return {
+        "success": True,
+        "rows": paginated_rows,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max(total_pages, 1),
+    }

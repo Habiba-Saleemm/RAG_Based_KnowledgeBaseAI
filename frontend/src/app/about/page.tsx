@@ -1,4 +1,4 @@
-export default function About5Page() {
+export default function sss() {
   return (
     <main className="min-h-screen bg-linear-to-br from-slate-100 via-blue-100 to-indigo-200 p-8">
       <div className="mx-auto max-w-3xl">

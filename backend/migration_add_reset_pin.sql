@@ -10,9 +10,9 @@ ADD COLUMN reset_pin VARCHAR(6) DEFAULT NULL;
 ALTER TABLE users
 ADD COLUMN reset_pin_expires DATETIME DEFAULT NULL;
 
-SELECT email, reset_pin, reset_pin_expires 
+SELECT id,email, reset_pin, reset_pin_expires 
 FROM users WHERE reset_pin IS NOT NULL;
 
-update users set reset_pin_expires = '2026-08-06 15:12:50' where email = 'test@user.com'
+update users set reset_pin_expires = '2026-08-06 15:12:50' where email = 'test@user.com';
 
-update users set reset_pin_expires = '2026-08-06 15:12:50' where id = 4;
+update users set reset_pin_expires = '2026-08-10 15:12:50' where id = 4;

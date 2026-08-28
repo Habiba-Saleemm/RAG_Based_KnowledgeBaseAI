@@ -7,7 +7,7 @@ const navLinks = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/faq", label: "FAQ" },
   { href: "/chat", label: "AI Chat" },
-  { href: "/about2", label: "About" },
+  { href: "/about", label: "About" },
 ];
 
 export default function HeaderNav() {

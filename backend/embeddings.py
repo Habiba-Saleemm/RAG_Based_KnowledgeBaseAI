@@ -1,110 +1,244 @@
 """
 embeddings.py
+
 Loads a small, free Hugging Face sentence-embedding model once at import time.
 
-No API key needed — the model runs locally. The first run downloads it
-(~80MB) from Hugging Face; after that it's cached on disk and works offline.
+The model runs locally. No API key is required.
 
-FAQ embeddings are precomputed once (on create/update) and stored as JSON
-text in the database, so /api/ask only has to embed the incoming question —
-not re-embed every FAQ on every request.
+FAQ and document embeddings are stored in the database so /api/ask
+only needs to embed the incoming question.
 """
 
 import json
 
-from sentence_transformers import SentenceTransformer
 import numpy as np
+from sentence_transformers import SentenceTransformer
+from chroma_client import get_collection
+
+
+# ---------------------------------------------------------
+# MODEL
+# ---------------------------------------------------------
 
 _model = SentenceTransformer("all-MiniLM-L6-v2")
 
-SIMILARITY_THRESHOLD = 0.7
 
+# ---------------------------------------------------------
+# SIMILARITY THRESHOLD
+# ---------------------------------------------------------
+
+SIMILARITY_THRESHOLD = 0.5
+
+
+# ---------------------------------------------------------
+# CREATE EMBEDDING
+# ---------------------------------------------------------
 
 def embed_text(text: str) -> list[float]:
-    vector = _model.encode([text], normalize_embeddings=True)[0]
+    vector = _model.encode(
+        [text],
+        normalize_embeddings=True
+    )[0]
+
     return vector.tolist()
 
+
+# ---------------------------------------------------------
+# SERIALIZE / DESERIALIZE
+# ---------------------------------------------------------
 
 def serialize_embedding(vector: list[float]) -> str:
     return json.dumps(vector)
 
 
 def deserialize_embedding(raw: str) -> np.ndarray:
-    return np.array(json.loads(raw), dtype=np.float32)
+    return np.array(
+        json.loads(raw),
+        dtype=np.float32
+    )
 
 
-def find_best_faq_match(question: str, faqs: list[dict]) -> dict | None:
-    usable_faqs = [f for f in faqs if f.get("embedding")]
+# ---------------------------------------------------------
+# COSINE SIMILARITY
+# ---------------------------------------------------------
+
+def cosine_similarity(
+    vector1: np.ndarray,
+    vector2: np.ndarray
+) -> float:
+
+    norm1 = np.linalg.norm(vector1)
+    norm2 = np.linalg.norm(vector2)
+
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
+
+    return float(
+        np.dot(vector1, vector2) /
+        (norm1 * norm2)
+    )
+
+
+# ---------------------------------------------------------
+# OLD FAQ MATCH FUNCTION
+# ---------------------------------------------------------
+
+def find_best_faq_match(
+    question: str,
+    faqs: list[dict]
+) -> dict | None:
+
+    usable_faqs = [
+        f for f in faqs
+        if f.get("embedding")
+    ]
+
     if not usable_faqs:
         return None
 
-    question_vector = np.array(embed_text(question), dtype=np.float32)
+    question_vector = np.array(
+        embed_text(question),
+        dtype=np.float32
+    )
 
     best_faq = None
     best_score = -1.0
 
     for faq in usable_faqs:
-        faq_vector = deserialize_embedding(faq["embedding"])
-        score = float(np.dot(faq_vector, question_vector))
+
+        faq_vector = deserialize_embedding(
+            faq["embedding"]
+        )
+
+        score = cosine_similarity(
+            faq_vector,
+            question_vector
+        )
+
         if score > best_score:
             best_score = score
             best_faq = faq
 
-    if best_faq is None or best_score < SIMILARITY_THRESHOLD:
+    if (
+        best_faq is None
+        or best_score < SIMILARITY_THRESHOLD
+    ):
         return None
 
     match = dict(best_faq)
     match["score"] = best_score
+
     return match
 
+
+# ---------------------------------------------------------
+# GREETINGS
+# ---------------------------------------------------------
+
 GREETING_WORDS = {
-    "hi", "hey", "hello", "yo", "hola",
-    "thanks", "thank you", "thankyou", "ty",
-    "bye", "goodbye", "see you",
+    "hi",
+    "hey",
+    "hello",
+    "yo",
+    "hola",
+    "thanks",
+    "thank you",
+    "thankyou",
+    "ty",
+    "bye",
+    "goodbye",
+    "see you",
 }
 
-GREETING_RESPONSE = "Hi there! Ask me anything from our About and FAQs sections and I'll do my best to help."
+GREETING_RESPONSE = (
+    "Hi there! Ask me anything from our About and FAQs "
+    "sections and I'll do my best to help."
+)
 
 
 def is_greeting(question: str) -> bool:
-    normalized = question.strip().lower().rstrip("!?. ")
+
+    normalized = (
+        question
+        .strip()
+        .lower()
+        .rstrip("!?. ")
+    )
+
     return normalized in GREETING_WORDS
 
 
-# ABOUT SECTION EMBEDDINGS
+# ---------------------------------------------------------
+# CONVERT EMBEDDING TO NUMPY VECTOR
+# ---------------------------------------------------------
+
 def _to_vector(embedding) -> np.ndarray:
-    """Accepts either a JSON string (from DB) or a plain list (in-memory) and
-    normalizes both into a numpy array."""
+
+    """
+    Accepts either:
+
+    1. JSON string from database
+    2. Python list from in-memory data
+
+    and converts both to numpy arrays.
+    """
+
     if isinstance(embedding, str):
+
         return deserialize_embedding(embedding)
-    return np.array(embedding, dtype=np.float32)
+
+    return np.array(
+        embedding,
+        dtype=np.float32
+    )
 
 
-def find_best_match(question: str, items: list[dict]) -> dict | None:
+# ---------------------------------------------------------
+# CHROMA-BACKED MATCH FUNCTION
+# ---------------------------------------------------------
+
+def find_best_match(
+    question: str,
+    source_filter: dict | None = None,
+) -> dict | None:
     """
-    Generalized version of find_best_faq_match — works across ANY mix of
-    sources (FAQs from the DB, About sections from memory, etc.) as long as
-    each item has "answer" and "embedding" keys.
+    Finds the most semantically similar item using Chroma.
+
+    source_filter example: {"source": "faq"} to search only FAQs.
+    Pass None to search everything (faq + document + about).
     """
-    usable = [i for i in items if i.get("embedding")]
-    if not usable:
+
+    collection = get_collection()
+
+    question_vector = embed_text(question)
+
+    results = collection.query(
+        query_embeddings=[question_vector],
+        n_results=1,
+        where=source_filter,
+    )
+
+    ids = results.get("ids", [[]])[0]
+    if not ids:
         return None
 
-    question_vector = np.array(embed_text(question), dtype=np.float32)
+    distance = results["distances"][0][0]
+    score = 1 - distance  # cosine distance -> cosine similarity
 
-    best_item = None
-    best_score = -1.0
-
-    for item in usable:
-        item_vector = _to_vector(item["embedding"])
-        score = float(np.dot(item_vector, question_vector))
-        if score > best_score:
-            best_score = score
-            best_item = item
-
-    if best_item is None or best_score < SIMILARITY_THRESHOLD:
+    if score < SIMILARITY_THRESHOLD:
         return None
 
-    match = dict(best_item)
-    match["score"] = best_score
-    return match
+    metadata = results["metadatas"][0][0]
+    document_text = results["documents"][0][0]
+
+    return {
+        "id": metadata.get("sql_id"),
+        "source": metadata.get("source"),
+        "question": metadata.get("question"),
+        "answer": document_text,
+        "score": score,
+    }
+
+
+def find_best_faq_match(question: str) -> dict | None:
+    return find_best_match(question, source_filter={"source": "faq"})

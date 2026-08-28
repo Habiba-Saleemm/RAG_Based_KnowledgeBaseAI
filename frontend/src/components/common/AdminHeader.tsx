@@ -14,11 +14,9 @@ export default async function AdminHeader() {
         {/* Logo */}
         <Link href="/admin/faqs" className="flex items-center gap-3 group">
           <div className="flex h-9 w-9 items-center justify-center rounded-full bg-indigo-700 text-white font-bold text-sm shadow-md transition-transform duration-200 group-hover:scale-110">
-            K
+            KB
           </div>
-          <span className="text-xl font-extrabold tracking-tight text-indigo-700 transition-colors duration-200 group-hover:text-indigo-800">
-            Knowledge Base AI <span className="text-sm font-semibold text-gray-400">Admin</span>
-          </span>
+          <span className="text-sm font-semibold text-gray-400">Admin</span>
         </Link>
 
         {/* Admin Nav Links */}

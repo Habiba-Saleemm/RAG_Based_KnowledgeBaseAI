@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, type ChangeEvent, type FormEvent } from "react";
+import { useState, useRef, useEffect, type FormEvent } from "react";
 import Link from "next/link";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
@@ -14,63 +14,17 @@ export default function ChatInterfaceAdmin() {
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "ai",
-      text: "Hi! I am your AI assistant. You can ask me anything. Optionally upload a file and I will answer questions from it.",
+      text: "Hi! I am your AI assistant. You can ask me anything from the uploaded knowledge base.",
     },
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [file, setFile] = useState<File | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [uploadedFile, setUploadedFile] = useState<string>("");
-  const [error, setError] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Auto scroll to bottom on new message
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
-
-  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files?.[0]) {
-      setFile(e.target.files[0]);
-      setError("");
-    }
-  };
-
-  const handleUpload = async () => {
-    if (!file) return;
-    setUploading(true);
-    setError("");
-
-    const formData = new FormData();
-    formData.append("file", file);
-
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/upload`, {
-        method: "POST",
-        body: formData,
-        credentials: "include",
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.errors?.general || "Upload failed.");
-        return;
-      }
-      setUploadedFile(file.name);
-      setFile(null);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "ai",
-          text: `File "${file.name}" uploaded successfully! You can now ask questions about it.`,
-        },
-      ]);
-    } catch (err) {
-      setError("Could not connect to server.");
-    } finally {
-      setUploading(false);
-    }
-  };
 
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -114,7 +68,10 @@ export default function ChatInterfaceAdmin() {
         <div>
           <h2 className="text-2xl font-bold text-gray-800">AI Chat</h2>
           <p className="text-sm text-gray-500">
-            Ask anything — upload a file for document-specific answers
+            Ask anything from your knowledge base.{" "}
+            <Link href="/admin/documentpage" className="text-blue-600 hover:underline">
+              Manage documents →
+            </Link>
           </p>
         </div>
         <Link
@@ -123,35 +80,6 @@ export default function ChatInterfaceAdmin() {
         >
           ← Dashboard
         </Link>
-      </div>
-
-      {/* File Upload Section */}
-      <div className="rounded-2xl border-2 border-dashed border-blue-200 bg-blue-50 p-4">
-        <p className="mb-2 text-sm font-medium text-blue-700">
-          📎 Upload a file (PDF, Word, Excel, TXT) — Optional
-        </p>
-        {uploadedFile && (
-          <p className="mb-2 text-xs text-green-600 font-medium">
-             Active file: {uploadedFile}
-          </p>
-        )}
-        <div className="flex gap-2">
-          <input
-            type="file"
-            accept=".pdf,.docx,.xlsx,.txt"
-            onChange={handleFileChange}
-            className="flex-1 rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm text-gray-600 file:mr-3 file:rounded-lg file:border-0 file:bg-blue-600 file:px-3 file:py-1 file:text-sm file:font-medium file:text-white hover:file:bg-blue-700"
-          />
-          <button
-            type="button"
-            onClick={handleUpload}
-            disabled={!file || uploading}
-            className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow transition hover:bg-blue-700 disabled:opacity-50"
-          >
-            {uploading ? "Uploading..." : "Upload"}
-          </button>
-        </div>
-        {error && <p className="mt-2 text-xs text-red-500">{error}</p>}
       </div>
 
       {/* Chat Messages */}

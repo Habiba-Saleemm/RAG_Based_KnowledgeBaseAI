@@ -14,11 +14,8 @@ export default async function Header() {
         {/* Logo */}
         <Link href={isLoggedIn ? "/dashboard" : "/about"} className="flex items-center gap-3 group">
           <div className="flex h-9 w-9 items-center justify-center rounded-full bg-blue-600 text-white font-bold text-sm shadow-md transition-transform duration-200 group-hover:scale-110">
-            K
+            KB
           </div>
-          <span className="text-xl font-extrabold tracking-tight text-blue-600 transition-colors duration-200 group-hover:text-blue-700">
-            Knowledge Base AI
-          </span>
         </Link>
 
         {/* Nav Links */}

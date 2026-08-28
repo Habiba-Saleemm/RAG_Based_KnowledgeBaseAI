@@ -1,12 +1,7 @@
-"""
-db.py
-Handles the MySQL connection pool.
-Credentials come from environment variables (.env) — never hard-code them.
-"""
-
 import os
 import mysql.connector
 from mysql.connector import pooling
+from mysql.connector.constants import ClientFlag
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,9 +11,9 @@ dbconfig = {
     "user": os.getenv("DB_USER", "authapp"),
     "password": os.getenv("DB_PASSWORD", ""),
     "database": os.getenv("DB_NAME", "authdb"),
+    "client_flags": [ClientFlag.FOUND_ROWS],
 }
 
-# Connection pool = faster + safer than opening a new connection per request
 pool = pooling.MySQLConnectionPool(
     pool_name="auth_pool",
     pool_size=5,

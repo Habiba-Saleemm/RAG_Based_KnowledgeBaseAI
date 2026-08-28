@@ -3,14 +3,11 @@ import { NextRequest, NextResponse } from "next/server";
 const ADMIN_ROUTES = ["/admin"];
 const ADMIN_LOGIN_ROUTE = "/admin/login";
 
-const PROTECTED_ROUTES = ["/dashboard", "/faq", "/chat", "/admin/:path*"];
+const PROTECTED_ROUTES = ["/dashboard", "/faq", "/chat"];
 const USER_AUTH_ROUTES = ["/login"];
 
 const PUBLIC_ROUTES = [
-  "/about/:path*",
-  "/about2",
-  "/contact",
-  "/admin/register",
+  "/about",
 ];
  
 const BACKEND_URL =
@@ -35,7 +32,7 @@ async function getIsAdmin(sessionToken: string): Promise<boolean> {
   }
 }
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   const sessionToken = request.cookies.get("session_token");
@@ -116,6 +113,7 @@ export const config = {
     "/login",
     "/register",
     "/register/:path*",
-    "/about/:path*",
+    "/about",
+    "/users/:path*",
   ],
 };
