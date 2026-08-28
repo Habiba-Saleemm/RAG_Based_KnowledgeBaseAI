@@ -82,9 +82,4 @@ Forgot Password Flow:
 
 ---
 
-## IMPORTANT: Production Note
-In `main.py`, the `/api/forgot-password` endpoint currently returns `debug_pin` in the response for testing purposes.
-In production, remove this line and instead send the PIN via email/SMS:
-```python
-"debug_pin": pin,  # REMOVE THIS IN PRODUCTION
-```
+
